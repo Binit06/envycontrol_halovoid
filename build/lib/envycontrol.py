@@ -6,7 +6,6 @@ import re
 import subprocess
 import sys
 import shutil
-import glob
 from contextlib import contextmanager
 from json import loads, dump
 
@@ -307,92 +306,6 @@ def update_grub():
     else:
         logging.error("An error occurred while updating GRUB")
 
-# -- NEW SECTION FOR ALLOWING FAST SWITCHES USING PREBUILD INITRMFS
-def _get_kernel_version():
-    """Gets the current running kernel version."""
-    return os.uname().release
-
-def _generate_mode_initramfs(mode, output_path):
-    """
-    Generates a new initramfs for the CURRENT kernel and saves it to output_path.
-    """
-    kernel_version = _get_kernel_version()
-    print(f'Building new initramfs for kernel {kernel_version} ({mode})...')
-
-    command = ['dracut', '--force', output_path, kernel_version]
-
-    if shutil.which("systemd-inhibit"):
-        command = ['systemd-inhibit', '--who=envycontrol', '--why', f'Building initramfs for {mode}', '--', *command]
-
-    print('  (This may take a moment)...')
-    if logging.getLogger().level == logging.DEBUG:
-        p = subprocess.run(command)
-    else:
-        p = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
-    return p.returncode == 0 and os.path.exists(output_path)
-
-def switch_initramfs(mode):
-    """
-    Implements the 'Find -> Check -> Switch or Rebuild' logic.
-    """
-    current_kernel = _get_kernel_version()
-    
-
-    default_initrd_path = f'/boot/initramfs-{current_kernel}.img'
-
-    target_mode_initrd = f'/boot/initramfs-{current_kernel}-{mode}.img'
-    
-
-    pattern = f'/boot/initramfs-*-{mode}.img'
-    found_files = glob.glob(pattern)
-    
-    exact_match_found = False
-    
-    if found_files:
-        for file_path in found_files:
-            file_name = os.path.basename(file_path)
-            
-            if file_path == target_mode_initrd:
-                print(f"Found existing valid initramfs: {file_name}")
-                exact_match_found = True
-            else:
-                # It is old/stale. Delete it.
-                try:
-                    os.remove(file_path)
-                    print(f"Removed stale initramfs: {file_name}")
-                except OSError as e:
-                    logging.error(f"Failed to remove stale file {file_name}: {e}")
-
-    if exact_match_found:
-        print(f"Quick-switching to existing {mode} image...")
-    else:
-        print(f"No valid image found for current kernel {current_kernel}.")
-        if not _generate_mode_initramfs(mode, target_mode_initrd):
-             logging.error(f"Critical Error: Failed to generate initramfs for {mode}.")
-             sys.exit(1)
-        print("Build successful.")
-
-    if not os.path.exists(target_mode_initrd):
-        logging.error("Target initramfs missing. Aborting switch.")
-        sys.exit(1)
-
-    try:
-        target_name = os.path.basename(target_mode_initrd)
-        temp_link = default_initrd_path + '.tmp'
-        
-        if os.path.islink(default_initrd_path) or os.path.exists(default_initrd_path):
-            os.remove(default_initrd_path)
-
-        os.symlink(target_name, temp_link)
-        os.rename(temp_link, default_initrd_path)
-        
-        print(f"Successfully switched: {default_initrd_path} -> {target_name}")
-    except OSError as e:
-        logging.error(f"Failed to update symlink: {e}")
-        sys.exit(1)
-# NEW SECTION ENDED
-
 def graphics_mode_switcher(graphics_mode, user_display_manager, enable_force_comp, coolbits_value, rtd3_value, use_nvidia_current):
     print(f"Switching to {graphics_mode} mode")
 
@@ -421,7 +334,7 @@ def graphics_mode_switcher(graphics_mode, user_display_manager, enable_force_com
         if grub_modified:
             update_grub()
 
-        switch_initramfs(graphics_mode)
+        rebuild_initramfs()
     elif graphics_mode == 'hybrid':
         print(
             f"Enable PCI-Express Runtime D3 (RTD3) Power Management: {rtd3_value or False}")
@@ -457,7 +370,7 @@ def graphics_mode_switcher(graphics_mode, user_display_manager, enable_force_com
         if grub_modified:
             update_grub()
 
-        switch_initramfs(graphics_mode)
+        rebuild_initramfs()
     elif graphics_mode == 'nvidia':
         print(f"Enable ForceCompositionPipeline: {enable_force_comp}")
         print(f"Enable Coolbits: {coolbits_value or False}")
@@ -527,7 +440,7 @@ def graphics_mode_switcher(graphics_mode, user_display_manager, enable_force_com
         grub_modified = modify_grub_config("pcie_aspm=off", add=True)
         if grub_modified:
             update_grub()
-        switch_initramfs(graphics_mode)
+        rebuild_initramfs()
     print('Operation completed successfully')
     print('Please reboot your computer for changes to take effect!')
 
@@ -942,3 +855,4 @@ def get_current_mode():
 
 if __name__ == '__main__':
     main()
+

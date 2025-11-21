@@ -1,0 +1,22 @@
+Metadata-Version: 2.4
+Name: envycontrol
+Version: 3.5.2
+Summary: Easy GPU switching for Nvidia Optimus laptops under Linux
+Home-page: http://github.com/bayasdev/envycontrol
+Author: Victor Bayas
+Author-email: victorsbayas@gmail.com
+License: MIT
+Keywords: nvidia,optimus,prime,gpu,linux
+Classifier: Development Status :: 5 - Production/Stable
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: POSIX :: Linux
+License-File: LICENSE
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license
+Dynamic: license-file
+Dynamic: summary
