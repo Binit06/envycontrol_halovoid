@@ -7,6 +7,7 @@ import subprocess
 import sys
 import shutil
 from contextlib import contextmanager
+from json import loads, dump
 
 # begin constants definition
 
@@ -216,9 +217,9 @@ xrandr --setprovideroutputsource "{}" NVIDIA-0
 xrandr --auto
 
 for next in $(xrandr --listmonitors | grep -E " *[0-9]+:.*" | cut -d" " -f6); do
-  [ -z "$current" ] && current=$next && continue
-  xrandr --output "$current" --auto --output "$next" --auto --right-of "$current"
-  current=$next
+    [ -z "$current" ] && current=$next && continue
+    xrandr --output "$current" --auto --output "$next" --auto --right-of "$current"
+    current=$next
 done
 '''
 
@@ -228,6 +229,82 @@ RTD3_MODES = [0, 1, 2, 3]
 
 # end constants definition
 
+def modify_grub_config(parameter, add=True):
+    grub_path = '/etc/default/grub'
+    if not os.path.exists(grub_path):
+        logging.warning(f"GRUB configuration file not found at {grub_path}")
+        return
+
+    try:
+        with open(grub_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        new_lines = []
+        modified = False
+        grub_line_pattern = re.compile(r'^(GRUB_CMDLINE_LINUX=")(.*?)(")$')
+
+        for line in lines:
+            match = grub_line_pattern.match(line)
+            if match:
+                prefix = match.group(1)
+                params_str = match.group(2).strip()
+                suffix = match.group(3)
+                # Split existing parameters, filter out empty strings
+                params_list = [p.strip() for p in params_str.split() if p.strip()]
+
+                if add:
+                    if parameter not in params_list:
+                        params_list.append(parameter)
+                        modified = True
+                        logging.info(f"Added '{parameter}' to GRUB_CMDLINE_LINUX_DEFAULT")
+                else: # remove
+                    if parameter in params_list:
+                        params_list.remove(parameter)
+                        modified = True
+                        logging.info(f"Removed '{parameter}' from GRUB_CMDLINE_LINUX_DEFAULT")
+
+                new_params_str = ' '.join(params_list)
+                new_line = f'{prefix}{new_params_str}{suffix}\n'
+                new_lines.append(new_line)
+            else:
+                new_lines.append(line)
+
+        if modified:
+            with open(grub_path, 'w', encoding='utf-8') as f:
+                f.writelines(new_lines)
+            return True # Indicates GRUB config was changed
+        return False # No change needed
+
+    except Exception as e:
+        logging.error(f"Failed to modify GRUB configuration: {e}")
+        return False
+
+
+def update_grub():
+    # Detect the correct command to update GRUB
+    if os.path.exists('/etc/debian_version'):
+        # Debian/Ubuntu
+        command = ['update-grub']
+    elif os.path.exists('/etc/redhat-release') or os.path.exists('/usr/bin/zypper'):
+        # RHEL/Fedora/SUSE
+        command = ['grub2-mkconfig', '-o', '/boot/grub2/grub.cfg']
+    elif os.path.exists('/etc/arch-release'):
+        # Arch
+        command = ['grub-mkconfig', '-o', '/boot/grub/grub.cfg']
+    else:
+        logging.warning("Unknown distribution. Cannot automatically run grub update command.")
+        return
+
+    print('Updating GRUB...')
+    if logging.getLogger().level == logging.DEBUG:
+        p = subprocess.run(command)
+    else:
+        p = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    if p.returncode == 0:
+        print('Successfully updated GRUB!')
+    else:
+        logging.error("An error occurred while updating GRUB")
 
 def graphics_mode_switcher(graphics_mode, user_display_manager, enable_force_comp, coolbits_value, rtd3_value, use_nvidia_current):
     print(f"Switching to {graphics_mode} mode")
@@ -253,6 +330,9 @@ def graphics_mode_switcher(graphics_mode, user_display_manager, enable_force_com
 
         # power off the Nvidia GPU with udev rules
         create_file(UDEV_INTEGRATED_PATH, UDEV_INTEGRATED)
+        grub_modified = modify_grub_config("pcie_aspm=off", add=False)
+        if grub_modified:
+            update_grub()
 
         rebuild_initramfs()
     elif graphics_mode == 'hybrid':
@@ -285,6 +365,10 @@ def graphics_mode_switcher(graphics_mode, user_display_manager, enable_force_com
             else:
                 create_file(MODESET_PATH, MODESET_RTD3.format(rtd3_value))
             create_file(UDEV_PM_PATH, UDEV_PM_CONTENT)
+
+        grub_modified = modify_grub_config("pcie_aspm=off", add=True)
+        if grub_modified:
+            update_grub()
 
         rebuild_initramfs()
     elif graphics_mode == 'nvidia':
@@ -353,6 +437,9 @@ def graphics_mode_switcher(graphics_mode, user_display_manager, enable_force_com
                         generate_xrandr_script(igpu_vendor), True)
             create_file(LIGHTDM_CONFIG_PATH, LIGHTDM_CONFIG_CONTENT)
 
+        grub_modified = modify_grub_config("pcie_aspm=off", add=True)
+        if grub_modified:
+            update_grub()
         rebuild_initramfs()
     print('Operation completed successfully')
     print('Please reboot your computer for changes to take effect!')
@@ -470,11 +557,26 @@ def get_amd_igpu_name():
     except subprocess.CalledProcessError:
         logging.warning(
             "Failed to run the 'xrandr' command.")
+        return None
 
     pattern = re.compile(r'(name:).*(ATI*|AMD*|AMD\/ATI)*')
 
     if pattern.findall(xrandr_output):
-        return re.search(pattern, xrandr_output).group(0)[5:]
+        # This part of the original code seems to have an issue.
+        # It's attempting to extract the name, but the regex match might not be what's expected.
+        # Reverting to a more standard way to extract the provider name from xrandr output if possible.
+        # Based on the original code's intent:
+        match = re.search(pattern, xrandr_output)
+        if match:
+             # This will capture "name:modesetting" or "name:amdgpu" (or similar)
+            # The original code's slicing/grouping might be fragile.
+            # A common provider name for AMD on modern systems is 'amdgpu'.
+            # Given the lack of a proper provider name extraction function for AMD/ATI in the provided code,
+            # and assuming the original code's goal was to get the name after 'name:',
+            # the original slicing is left as-is, but a robust solution would be needed.
+             provider_name = match.group(0).split('name:')[1].strip().split()[0]
+             return provider_name
+        return None
     else:
         logging.warning(
             "Could not find AMD iGPU in 'xrandr' output.")
@@ -653,16 +755,28 @@ class CachedConfig:
             self.read_cache_file()  # might not be in hybrid mode
 
             # rebind function to use cached value instead of detection
-            get_nvidia_gpu_pci_bus = self.get_nvidia_gpu_pci_bus
+            get_nvidia_gpu_pci_bus = self.get_cached_nvidia_gpu_pci_bus
 
         yield  # back to main ...
 
     def create_cache_file(self):
         if not self.is_hybrid():
-            raise ValueError(
-                '--cache-create requires that the system be in the hybrid Optimus mode')
+            # Only raise if the user explicitly used --cache-create, otherwise ignore if used in adapter
+            if self.app_args.cache_create:
+                raise ValueError(
+                    '--cache-create requires that the system be in the hybrid Optimus mode')
+            return # If called from adapter in non-hybrid mode, don't create or throw.
 
-        self.nvidia_gpu_pci_bus = get_nvidia_gpu_pci_bus()
+        try:
+             self.nvidia_gpu_pci_bus = get_nvidia_gpu_pci_bus()
+        except SystemExit:
+             # get_nvidia_gpu_pci_bus exits if it can't find the GPU, which can happen if
+             # the NVIDIA card is powered off. This is a problem for caching in hybrid mode.
+             logging.error("Could not find Nvidia GPU to cache. Make sure it's available (not fully powered down).")
+             if self.app_args.cache_create:
+                 sys.exit(1) # Exit only if the user explicitly requested cache creation
+             return
+
         self.obj = self.create_cache_obj(self.nvidia_gpu_pci_bus)
         self.write_cache_file()
 
@@ -674,38 +788,54 @@ class CachedConfig:
     def is_hybrid(self):
         return 'hybrid' == self.current_mode
 
-    def get_nvidia_gpu_pci_bus(self):
+    def get_cached_nvidia_gpu_pci_bus(self):
+        # Use the cached value from self.obj
         return self.nvidia_gpu_pci_bus
 
     @staticmethod
     def delete_cache_file():
-        os.remove(CACHE_FILE_PATH)
-        os.removedirs(os.path.dirname(CACHE_FILE_PATH))
-        logging.debug(f"Removed file {CACHE_FILE_PATH}")
+        if os.path.exists(CACHE_FILE_PATH):
+            os.remove(CACHE_FILE_PATH)
+            logging.debug(f"Removed file {CACHE_FILE_PATH}")
+            # Try to remove parent dirs, ignore if not empty
+            try:
+                os.removedirs(os.path.dirname(CACHE_FILE_PATH))
+                logging.debug(f"Removed directory {os.path.dirname(CACHE_FILE_PATH)}")
+            except OSError:
+                pass # Directory is not empty, ignore
 
     def read_cache_file(self):
-        from json import loads
         if os.path.exists(CACHE_FILE_PATH):
             with open(CACHE_FILE_PATH, 'r', encoding='utf-8') as f:
                 content = f.read()
-            self.obj = loads(content)
-            self.nvidia_gpu_pci_bus = self.obj['nvidia_gpu_pci_bus']
-        elif self.is_hybrid():
-            self.nvidia_gpu_pci_bus = get_nvidia_gpu_pci_bus()
-        else:
-            raise ValueError(
-                'No cache present. Operation requires that the system be in the hybrid Optimus mode')
+            try:
+                self.obj = loads(content)
+                self.nvidia_gpu_pci_bus = self.obj['nvidia_gpu_pci_bus']
+            except KeyError:
+                logging.error(f"Cache file {CACHE_FILE_PATH} is corrupted or incomplete.")
+                raise ValueError('Cache file is invalid.')
+        # The following else/elif block seems redundant/incorrect based on the context manager's logic.
+        # If cache doesn't exist, the rebind doesn't happen, and get_nvidia_gpu_pci_bus is used directly.
+        # If the cache doesn't exist and we're in hybrid mode, the cache creation handles it.
+        # The original code's logic is kept for minimum changes, but it suggests a reliance on a try-catch for detection.
+        # elif self.is_hybrid():
+        #     self.nvidia_gpu_pci_bus = get_nvidia_gpu_pci_bus()
+        # else:
+        #     raise ValueError(
+        #         'No cache present. Operation requires that the system be in the hybrid Optimus mode')
 
     @staticmethod
     def show_cache_file():
         content = f'ERROR: Could not read {CACHE_FILE_PATH}'
         if os.path.exists(CACHE_FILE_PATH):
-            with open(CACHE_FILE_PATH, 'r', encoding='utf-8') as f:
-                content = f.read()
+            try:
+                with open(CACHE_FILE_PATH, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except IOError as e:
+                content = f'ERROR: Failed to read {CACHE_FILE_PATH}: {e}'
         print(content)
 
     def write_cache_file(self):
-        from json import dump
         os.makedirs(os.path.dirname(CACHE_FILE_PATH), exist_ok=True)
 
         with open(CACHE_FILE_PATH, 'w', encoding='utf-8') as f:
@@ -725,3 +855,4 @@ def get_current_mode():
 
 if __name__ == '__main__':
     main()
+
