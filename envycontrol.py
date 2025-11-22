@@ -250,7 +250,6 @@ def modify_grub_config(parameter, add=True):
                 prefix = match.group(1)
                 params_str = match.group(2).strip()
                 suffix = match.group(3)
-                # Split existing parameters, filter out empty strings
                 params_list = [p.strip() for p in params_str.split() if p.strip()]
 
                 if add:
@@ -258,7 +257,7 @@ def modify_grub_config(parameter, add=True):
                         params_list.append(parameter)
                         modified = True
                         logging.info(f"Added '{parameter}' to GRUB_CMDLINE_LINUX_DEFAULT")
-                else: # remove
+                else:
                     if parameter in params_list:
                         params_list.remove(parameter)
                         modified = True
@@ -273,7 +272,7 @@ def modify_grub_config(parameter, add=True):
         if modified:
             with open(grub_path, 'w', encoding='utf-8') as f:
                 f.writelines(new_lines)
-            return True # Indicates GRUB config was changed
+            return True # Grub Config was changes
         return False # No change needed
 
     except Exception as e:
@@ -282,15 +281,12 @@ def modify_grub_config(parameter, add=True):
 
 
 def update_grub():
-    # Detect the correct command to update GRUB
+    # Updating logic has not been checked on any other Distro except Fedora
     if os.path.exists('/etc/debian_version'):
-        # Debian/Ubuntu
         command = ['update-grub']
     elif os.path.exists('/etc/redhat-release') or os.path.exists('/usr/bin/zypper'):
-        # RHEL/Fedora/SUSE
         command = ['grub2-mkconfig', '-o', '/boot/grub2/grub.cfg']
     elif os.path.exists('/etc/arch-release'):
-        # Arch
         command = ['grub-mkconfig', '-o', '/boot/grub/grub.cfg']
     else:
         logging.warning("Unknown distribution. Cannot automatically run grub update command.")
@@ -310,7 +306,33 @@ def update_grub():
 # -- NEW SECTION FOR ALLOWING FAST SWITCHES USING PREBUILD INITRMFS
 def _get_kernel_version():
     """Gets the current running kernel version."""
-    return os.uname().release
+    run_ver = os.uname().release
+
+    potential_symlinks = ['/boot/vmlinuz', '/boot/vmlinuz-linuz']
+    disk_ver = None
+
+    for link in potential_symlinks:
+        if os.path.exists(link) and os.path.islink(link):
+            try:
+                target_file = os.path.basename(os.readlink)
+
+                if target_file.startswith('vmlinuz-'):
+                    disk_ver = target_file.replace('vmlinuz-', '')
+                    break
+            except OSError:
+                continue
+
+    if disk_ver and disk_ver != run_ver:
+        logging.error("CRITICAL KERNEL MISMATCH DETECTED!")
+        print(f"  Running Kernel:   {run_ver}")
+        print(f"  Installed Kernel: {disk_ver}")
+        print("\nIt appears you have updated your kernel but have not rebooted.")
+        print("Switching graphics modes now will generate a broken initramfs")
+        print("and could cause a boot failure.")
+        print("\nPLEASE REBOOT YOUR SYSTEM AND TRY AGAIN.")
+        sys.exit(1)
+    
+    return run_ver
 
 def _generate_mode_initramfs(mode, output_path):
     """
@@ -333,9 +355,6 @@ def _generate_mode_initramfs(mode, output_path):
     return p.returncode == 0 and os.path.exists(output_path)
 
 def switch_initramfs(mode):
-    """
-    Implements the 'Find -> Check -> Switch or Rebuild' logic.
-    """
     current_kernel = _get_kernel_version()
     
 
@@ -356,13 +375,14 @@ def switch_initramfs(mode):
             if file_path == target_mode_initrd:
                 print(f"Found existing valid initramfs: {file_name}")
                 exact_match_found = True
-            else:
+            # else:
+                # Not sure if deleting it is right or not
                 # It is old/stale. Delete it.
-                try:
-                    os.remove(file_path)
-                    print(f"Removed stale initramfs: {file_name}")
-                except OSError as e:
-                    logging.error(f"Failed to remove stale file {file_name}: {e}")
+                # try:
+                #     os.remove(file_path)
+                #     print(f"Removed stale initramfs: {file_name}")
+                # except OSError as e:
+                #     logging.error(f"Failed to remove stale file {file_name}: {e}")
 
     if exact_match_found:
         print(f"Quick-switching to existing {mode} image...")

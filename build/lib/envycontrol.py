@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import shutil
+import glob
 from contextlib import contextmanager
 from json import loads, dump
 
@@ -249,7 +250,6 @@ def modify_grub_config(parameter, add=True):
                 prefix = match.group(1)
                 params_str = match.group(2).strip()
                 suffix = match.group(3)
-                # Split existing parameters, filter out empty strings
                 params_list = [p.strip() for p in params_str.split() if p.strip()]
 
                 if add:
@@ -257,7 +257,7 @@ def modify_grub_config(parameter, add=True):
                         params_list.append(parameter)
                         modified = True
                         logging.info(f"Added '{parameter}' to GRUB_CMDLINE_LINUX_DEFAULT")
-                else: # remove
+                else:
                     if parameter in params_list:
                         params_list.remove(parameter)
                         modified = True
@@ -272,7 +272,7 @@ def modify_grub_config(parameter, add=True):
         if modified:
             with open(grub_path, 'w', encoding='utf-8') as f:
                 f.writelines(new_lines)
-            return True # Indicates GRUB config was changed
+            return True # Grub Config was changes
         return False # No change needed
 
     except Exception as e:
@@ -281,15 +281,12 @@ def modify_grub_config(parameter, add=True):
 
 
 def update_grub():
-    # Detect the correct command to update GRUB
+    # Updating logic has not been checked on any other Distro except Fedora
     if os.path.exists('/etc/debian_version'):
-        # Debian/Ubuntu
         command = ['update-grub']
     elif os.path.exists('/etc/redhat-release') or os.path.exists('/usr/bin/zypper'):
-        # RHEL/Fedora/SUSE
         command = ['grub2-mkconfig', '-o', '/boot/grub2/grub.cfg']
     elif os.path.exists('/etc/arch-release'):
-        # Arch
         command = ['grub-mkconfig', '-o', '/boot/grub/grub.cfg']
     else:
         logging.warning("Unknown distribution. Cannot automatically run grub update command.")
@@ -305,6 +302,116 @@ def update_grub():
         print('Successfully updated GRUB!')
     else:
         logging.error("An error occurred while updating GRUB")
+
+# -- NEW SECTION FOR ALLOWING FAST SWITCHES USING PREBUILD INITRMFS
+def _get_kernel_version():
+    """Gets the current running kernel version."""
+    run_ver = os.uname().release
+
+    potential_symlinks = ['/boot/vmlinuz', '/boot/vmlinuz-linuz']
+    disk_ver = None
+
+    for link in potential_symlinks:
+        if os.path.exists(link) and os.path.islink(link):
+            try:
+                target_file = os.path.basename(os.readlink)
+
+                if target_file.startswith('vmlinuz-'):
+                    disk_ver = target_file.replace('vmlinuz-', '')
+                    break
+            except OSError:
+                continue
+
+    if disk_ver and disk_ver != run_ver:
+        logging.error("CRITICAL KERNEL MISMATCH DETECTED!")
+        print(f"  Running Kernel:   {run_ver}")
+        print(f"  Installed Kernel: {disk_ver}")
+        print("\nIt appears you have updated your kernel but have not rebooted.")
+        print("Switching graphics modes now will generate a broken initramfs")
+        print("and could cause a boot failure.")
+        print("\nPLEASE REBOOT YOUR SYSTEM AND TRY AGAIN.")
+        sys.exit(1)
+    
+    return run_ver
+
+def _generate_mode_initramfs(mode, output_path):
+    """
+    Generates a new initramfs for the CURRENT kernel and saves it to output_path.
+    """
+    kernel_version = _get_kernel_version()
+    print(f'Building new initramfs for kernel {kernel_version} ({mode})...')
+
+    command = ['dracut', '--force', output_path, kernel_version]
+
+    if shutil.which("systemd-inhibit"):
+        command = ['systemd-inhibit', '--who=envycontrol', '--why', f'Building initramfs for {mode}', '--', *command]
+
+    print('  (This may take a moment)...')
+    if logging.getLogger().level == logging.DEBUG:
+        p = subprocess.run(command)
+    else:
+        p = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    return p.returncode == 0 and os.path.exists(output_path)
+
+def switch_initramfs(mode):
+    current_kernel = _get_kernel_version()
+    
+
+    default_initrd_path = f'/boot/initramfs-{current_kernel}.img'
+
+    target_mode_initrd = f'/boot/initramfs-{current_kernel}-{mode}.img'
+    
+
+    pattern = f'/boot/initramfs-*-{mode}.img'
+    found_files = glob.glob(pattern)
+    
+    exact_match_found = False
+    
+    if found_files:
+        for file_path in found_files:
+            file_name = os.path.basename(file_path)
+            
+            if file_path == target_mode_initrd:
+                print(f"Found existing valid initramfs: {file_name}")
+                exact_match_found = True
+            # else:
+                # Not sure if deleting it is right or not
+                # It is old/stale. Delete it.
+                # try:
+                #     os.remove(file_path)
+                #     print(f"Removed stale initramfs: {file_name}")
+                # except OSError as e:
+                #     logging.error(f"Failed to remove stale file {file_name}: {e}")
+
+    if exact_match_found:
+        print(f"Quick-switching to existing {mode} image...")
+    else:
+        print(f"No valid image found for current kernel {current_kernel}.")
+        if not _generate_mode_initramfs(mode, target_mode_initrd):
+             logging.error(f"Critical Error: Failed to generate initramfs for {mode}.")
+             sys.exit(1)
+        print("Build successful.")
+
+    if not os.path.exists(target_mode_initrd):
+        logging.error("Target initramfs missing. Aborting switch.")
+        sys.exit(1)
+
+    try:
+        target_name = os.path.basename(target_mode_initrd)
+        temp_link = default_initrd_path + '.tmp'
+        
+        if os.path.islink(default_initrd_path) or os.path.exists(default_initrd_path):
+            os.remove(default_initrd_path)
+
+        os.symlink(target_name, temp_link)
+        os.rename(temp_link, default_initrd_path)
+        
+        print(f"Successfully switched: {default_initrd_path} -> {target_name}")
+    except OSError as e:
+        logging.error(f"Failed to update symlink: {e}")
+        sys.exit(1)
+# NEW SECTION ENDED
 
 def graphics_mode_switcher(graphics_mode, user_display_manager, enable_force_comp, coolbits_value, rtd3_value, use_nvidia_current):
     print(f"Switching to {graphics_mode} mode")
@@ -334,7 +441,7 @@ def graphics_mode_switcher(graphics_mode, user_display_manager, enable_force_com
         if grub_modified:
             update_grub()
 
-        rebuild_initramfs()
+        switch_initramfs(graphics_mode)
     elif graphics_mode == 'hybrid':
         print(
             f"Enable PCI-Express Runtime D3 (RTD3) Power Management: {rtd3_value or False}")
@@ -370,7 +477,7 @@ def graphics_mode_switcher(graphics_mode, user_display_manager, enable_force_com
         if grub_modified:
             update_grub()
 
-        rebuild_initramfs()
+        switch_initramfs(graphics_mode)
     elif graphics_mode == 'nvidia':
         print(f"Enable ForceCompositionPipeline: {enable_force_comp}")
         print(f"Enable Coolbits: {coolbits_value or False}")
@@ -440,7 +547,7 @@ def graphics_mode_switcher(graphics_mode, user_display_manager, enable_force_com
         grub_modified = modify_grub_config("pcie_aspm=off", add=True)
         if grub_modified:
             update_grub()
-        rebuild_initramfs()
+        switch_initramfs(graphics_mode)
     print('Operation completed successfully')
     print('Please reboot your computer for changes to take effect!')
 
@@ -855,4 +962,3 @@ def get_current_mode():
 
 if __name__ == '__main__':
     main()
-
