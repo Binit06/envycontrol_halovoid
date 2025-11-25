@@ -375,14 +375,12 @@ def switch_initramfs(mode):
             if file_path == target_mode_initrd:
                 print(f"Found existing valid initramfs: {file_name}")
                 exact_match_found = True
-            # else:
-                # Not sure if deleting it is right or not
-                # It is old/stale. Delete it.
-                # try:
-                #     os.remove(file_path)
-                #     print(f"Removed stale initramfs: {file_name}")
-                # except OSError as e:
-                #     logging.error(f"Failed to remove stale file {file_name}: {e}")
+            else:
+                try:
+                    os.remove(file_path)
+                    print(f"Removed stale initramfs: {file_name}")
+                except OSError as e:
+                    logging.error(f"Failed to remove stale file {file_name}: {e}")
 
     if exact_match_found:
         print(f"Quick-switching to existing {mode} image...")
