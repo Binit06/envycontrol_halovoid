@@ -435,9 +435,10 @@ def graphics_mode_switcher(graphics_mode, user_display_manager, enable_force_com
 
         # power off the Nvidia GPU with udev rules
         create_file(UDEV_INTEGRATED_PATH, UDEV_INTEGRATED)
-        grub_modified = modify_grub_config("pcie_aspm=off", add=False)
-        if grub_modified:
-            update_grub()
+        # I do not find it necessary to disable ASPM for integrated mode, since the dGPU is supposed to be powered off, but leaving this here just in case
+        # grub_modified = modify_grub_config("pcie_aspm=off", add=False)
+        # if grub_modified:
+        #     update_grub()
 
         switch_initramfs(graphics_mode)
     elif graphics_mode == 'hybrid':
@@ -471,9 +472,10 @@ def graphics_mode_switcher(graphics_mode, user_display_manager, enable_force_com
                 create_file(MODESET_PATH, MODESET_RTD3.format(rtd3_value))
             create_file(UDEV_PM_PATH, UDEV_PM_CONTENT)
 
-        grub_modified = modify_grub_config("pcie_aspm=off", add=True)
-        if grub_modified:
-            update_grub()
+        # Commenting out the ASPM changes because I am not sure if it will work correctly with every hardware
+        # grub_modified = modify_grub_config("pcie_aspm=off", add=True)
+        # if grub_modified:
+        #     update_grub()
 
         switch_initramfs(graphics_mode)
     elif graphics_mode == 'nvidia':
@@ -542,9 +544,10 @@ def graphics_mode_switcher(graphics_mode, user_display_manager, enable_force_com
                         generate_xrandr_script(igpu_vendor), True)
             create_file(LIGHTDM_CONFIG_PATH, LIGHTDM_CONFIG_CONTENT)
 
-        grub_modified = modify_grub_config("pcie_aspm=off", add=True)
-        if grub_modified:
-            update_grub()
+        # Commenting out the ASPM changes because I am not sure if it will work correctly with every hardware
+        # grub_modified = modify_grub_config("pcie_aspm=off", add=True)
+        # if grub_modified:
+        #     update_grub()
         switch_initramfs(graphics_mode)
     print('Operation completed successfully')
     print('Please reboot your computer for changes to take effect!')
@@ -566,6 +569,9 @@ def cleanup():
         '/lib/udev/rules.d/50-remove-nvidia.rules',
         '/lib/udev/rules.d/80-nvidia-pm.rules'
     ]
+
+    for mode in ['integrated', 'hybrid', 'nvidia']:
+        to_remove.extend(glob.glob(f'/boot/initramfs-*-{mode}.img'))
 
     # remove each file in the list
     for file_path in to_remove:
