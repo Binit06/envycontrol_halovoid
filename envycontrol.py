@@ -228,6 +228,7 @@ SUPPORTED_MODES = ['integrated', 'hybrid', 'nvidia']
 SUPPORTED_DISPLAY_MANAGERS = ['gdm', 'gdm3', 'sddm', 'lightdm']
 RTD3_MODES = [0, 1, 2, 3]
 
+CACHE_DIR = '/var/cache/envycontrol/initramfs'
 # end constants definition
 
 def modify_grub_config(parameter, add=True):
@@ -314,7 +315,7 @@ def _get_kernel_version():
     for link in potential_symlinks:
         if os.path.exists(link) and os.path.islink(link):
             try:
-                target_file = os.path.basename(os.readlink)
+                target_file = os.path.basename(os.readlink(link))
 
                 if target_file.startswith('vmlinuz-'):
                     disk_ver = target_file.replace('vmlinuz-', '')
@@ -359,53 +360,32 @@ def switch_initramfs(mode):
     
 
     default_initrd_path = f'/boot/initramfs-{current_kernel}.img'
+    cached_mode_initrd = f'{CACHE_DIR}/initramfs-{current_kernel}-{mode}.img'
+    active_envy_initrd = f'/boot/initramfs-{current_kernel}-active.img'
 
-    target_mode_initrd = f'/boot/initramfs-{current_kernel}-{mode}.img'
+    if not os.path.exists(f'{CACHE_DIR}'):
+        print(f"Cache directory not found at {CACHE_DIR}. Creating...")
+        os.makedirs(f'{CACHE_DIR}')
     
-
-    pattern = f'/boot/initramfs-*-{mode}.img'
-    found_files = glob.glob(pattern)
-    
-    exact_match_found = False
-    
-    if found_files:
-        for file_path in found_files:
-            file_name = os.path.basename(file_path)
-            
-            if file_path == target_mode_initrd:
-                print(f"Found existing valid initramfs: {file_name}")
-                exact_match_found = True
-            else:
-                try:
-                    os.remove(file_path)
-                    print(f"Removed stale initramfs: {file_name}")
-                except OSError as e:
-                    logging.error(f"Failed to remove stale file {file_name}: {e}")
-
-    if exact_match_found:
-        print(f"Quick-switching to existing {mode} image...")
-    else:
-        print(f"No valid image found for current kernel {current_kernel}.")
-        if not _generate_mode_initramfs(mode, target_mode_initrd):
+    if not os.path.exists(cached_mode_initrd):
+        print(f"No cached image found for {mode}. Building...")
+        if not _generate_mode_initramfs(mode, cached_mode_initrd):
              logging.error(f"Critical Error: Failed to generate initramfs for {mode}.")
              sys.exit(1)
-        print("Build successful.")
-
-    if not os.path.exists(target_mode_initrd):
-        logging.error("Target initramfs missing. Aborting switch.")
-        sys.exit(1)
+    
+    print("Copying image from cache to /boot...")
+    shutil.copy2(cached_mode_initrd, active_envy_initrd)
 
     try:
-        target_name = os.path.basename(target_mode_initrd)
         temp_link = default_initrd_path + '.tmp'
         
         if os.path.islink(default_initrd_path) or os.path.exists(default_initrd_path):
             os.remove(default_initrd_path)
 
-        os.symlink(target_name, temp_link)
+        os.symlink(os.path.basename(active_envy_initrd), temp_link)
         os.rename(temp_link, default_initrd_path)
         
-        print(f"Successfully switched: {default_initrd_path} -> {target_name}")
+        print(f"Successfully switched mode to {mode}")
     except OSError as e:
         logging.error(f"Failed to update symlink: {e}")
         sys.exit(1)
@@ -571,12 +551,20 @@ def cleanup():
     ]
 
     for mode in ['integrated', 'hybrid', 'nvidia']:
-        to_remove.extend(glob.glob(f'/boot/initramfs-*-{mode}.img'))
+        to_remove.extend(glob.glob(f'{CACHE_DIR}/initramfs-*-{mode}.img'))
+
+    active_images = glob.glob('/boot/initramfs-*-active.img')
+    to_remove.extend(active_images)
+
+    for active_img in active_images:
+        symlink_path = active_img.replace('-active.img', '.img')
+        if os.path.islink(symlink_path):
+            to_remove.append(symlink_path)
 
     # remove each file in the list
     for file_path in to_remove:
         try:
-            if os.path.exists(file_path):
+            if os.path.lexists(file_path):
                 os.remove(file_path)
                 logging.info(f"Removed file {file_path}")
         except OSError as e:
