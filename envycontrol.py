@@ -377,28 +377,57 @@ def _generate_mode_initramfs(mode, output_path):
 
 
 def cleanup_active_state(active_envy_initrd):
+    # If the stale path is the same as the active path we are going to use,
+    # skip it — we'll overwrite it anyway via shutil.copy2 later.
     print("Trying to cleanup stale initramfs")
     for stale_active in glob.glob("/boot/initramfs-*-active.img"):
         logging.info(f"Found active images: {glob.glob('/boot/initramfs-*-active.img')}")
-        """
-        If the stale path is the same as the active path that we are going to use then just continue as we will be replacing the same upon copying
-        """
         if stale_active == active_envy_initrd:
             continue
-
+ 
         stale_path = re.sub(r"-active\.img", ".img", stale_active)
+ 
+        # CRITICAL FIX: the old code removed the active image unconditionally,
+        # even when the stale_path was NOT a symlink (i.e. it was a real file).
+        # In that case os.remove(stale_active) would delete a file that the
+        # bootloader still needs.  We now only remove the active image after
+        # confirming the symlink was successfully removed, and refuse entirely
+        # if stale_path turns out to be a regular file.
         if os.path.islink(stale_path):
             try:
-                os.unlink(stale_path) #Removes the symlink between the main file and active file
+                os.unlink(stale_path)
                 print(f"Removed stale symlink for {stale_path}")
             except OSError as e:
-                logging.error(f"Failed to remove stale symlink '{stale_path}': {e}")
+                logging.error(
+                    f"Failed to remove stale symlink '{stale_path}': {e} — "
+                    "skipping removal of active image to avoid data loss."
+                )
+                continue  # Do NOT remove the active image if the symlink removal failed
+ 
+            # Symlink gone: now safe to remove the active copy
+            try:
+                os.remove(stale_active)
+                print(f"Removed stale active image {stale_active}")
+            except OSError as e:
+                logging.error(f"Failed to remove stale active image '{stale_active}': {e}")
+ 
+        elif os.path.lexists(stale_path):
+            # stale_path exists but is a real file — refuse to touch anything.
+            # Removing the active image here could leave the system with neither
+            # the symlink nor a valid initramfs at that path.
+            logging.warning(
+                f"'{stale_path}' is a real file, not a symlink. "
+                "Refusing to remove active image to avoid corrupting boot."
+            )
+        else:
+            # stale_path does not exist at all — the symlink was already gone.
+            # Still safe to clean up the orphaned active image.
+            try:
+                os.remove(stale_active)
+                print(f"Removed orphaned active image {stale_active}")
+            except OSError as e:
+                logging.error(f"Failed to remove orphaned active image '{stale_active}': {e}")
 
-        try:
-            os.remove(stale_active) #Removes the stale old active file after symlink has been removed
-            print(f"Removed stale active image {stale_active}")
-        except OSError as e:
-            logging.error(f"Failed to remove stale active image '{stale_active}': {e}")
 
 
 def switch_initramfs(mode):
@@ -1024,31 +1053,73 @@ class CachedConfig:
 
     @staticmethod
     def delete_cache_file():
-        to_remove = []
-
+        # CRITICAL FIX: the original code added active_images to to_remove AND
+        # also unlinked their symlinks (e.g. initramfs-<kernel>.img → active).
+        # After the symlink was removed, os.remove() on the active image path
+        # would resolve through to—and permanently delete—the real initramfs on
+        # disk, leaving the system unbootable.
+        #
+        # Correct order:
+        #   1. Delete the per-mode copies in CACHE_DIR (safe — they are our copies)
+        #   2. Remove the symlink at /boot/initramfs-<kernel>.img
+        #   3. Remove the active copy at /boot/initramfs-<kernel>-active.img
+        # The active image path must NEVER appear in the same removal list as
+        # the symlink target, and a real file must NEVER be removed as a symlink.
+ 
+        # Step 1: delete per-mode cached copies in CACHE_DIR (safe to delete)
+        cached_images = []
         for mode in ["integrated", "hybrid", "nvidia"]:
-            to_remove.extend(glob.glob(f"{CACHE_DIR}/initramfs-*-{mode}.img"))
-
+            cached_images.extend(glob.glob(f"{CACHE_DIR}/initramfs-*-{mode}.img"))
+ 
+        for file in cached_images:
+            try:
+                os.remove(file)
+                logging.debug(f"Removed cached image {file}")
+            except OSError as e:
+                logging.warning(f"Could not remove cached image '{file}': {e}")
+ 
+        # Steps 2+3: for each active image, first remove the symlink that points
+        # at it, THEN remove the active image.  Keep these as separate targeted
+        # operations — never batch them into a shared removal list.
         active_images = glob.glob("/boot/initramfs-*-active.img")
-        to_remove.extend(active_images)
-
-        for active_img in active_images: #Removes the linking to the path so that somehow they do not get removed in this process
+        for active_img in active_images:
             symlink_path = active_img.replace("-active.img", ".img")
+ 
             if os.path.islink(symlink_path):
-                os.unlink(symlink_path)
-
-        for file in to_remove: #removes the files mentioned in to_remove array
-            os.remove(file)
-
+                # Safe: this is our symlink pointing at active_img
+                try:
+                    os.unlink(symlink_path)
+                    logging.debug(f"Removed symlink {symlink_path}")
+                except OSError as e:
+                    logging.warning(f"Could not remove symlink '{symlink_path}': {e}")
+            elif os.path.lexists(symlink_path):
+                # It's a real file, not a symlink — refuse to delete it; it is
+                # the system's actual initramfs and removing it would brick the boot.
+                logging.warning(
+                    f"'{symlink_path}' is a regular file, not a symlink — "
+                    "skipping to avoid deleting your system initramfs."
+                )
+ 
+            # Now remove only the active copy (our own copy, safe to delete)
+            try:
+                os.remove(active_img)
+                logging.debug(f"Removed active image {active_img}")
+            except OSError as e:
+                logging.warning(f"Could not remove active image '{active_img}': {e}")
+ 
         if os.path.exists(CACHE_FILE_PATH):
-            os.remove(CACHE_FILE_PATH)
-            logging.debug(f"Removed file {CACHE_FILE_PATH}")
+            try:
+                os.remove(CACHE_FILE_PATH)
+                logging.debug(f"Removed file {CACHE_FILE_PATH}")
+            except OSError as e:
+                logging.error(f"Could not remove cache file '{CACHE_FILE_PATH}': {e}")
             # Try to remove parent dirs, ignore if not empty
             try:
                 os.removedirs(os.path.dirname(CACHE_FILE_PATH))
                 logging.debug(f"Removed directory {os.path.dirname(CACHE_FILE_PATH)}")
             except OSError:
-                pass  # Directory is not empty, ignore
+                pass  # Directory not empty — that's fine
+
 
     def read_cache_file(self):
         if os.path.exists(CACHE_FILE_PATH):
